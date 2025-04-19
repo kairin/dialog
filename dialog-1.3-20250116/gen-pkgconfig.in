@@ -1,0 +1,237 @@
+#!@SHELL@
+# $Id: gen-pkgconfig.in,v 1.10 2025/01/14 23:26:03 tom Exp $
+##############################################################################
+# Copyright 2023-2024,2025 Thomas E. Dickey                                  #
+#                                                                            #
+# Permission is hereby granted, free of charge, to any person obtaining a    #
+# copy of this software and associated documentation files (the "Software"), #
+# to deal in the Software without restriction, including without limitation  #
+# the rights to use, copy, modify, merge, publish, distribute, distribute    #
+# with modifications, sublicense, and/or sell copies of the Software, and to #
+# permit persons to whom the Software is furnished to do so, subject to the  #
+# following conditions:                                                      #
+#                                                                            #
+# The above copyright notice and this permission notice shall be included in #
+# all copies or substantial portions of the Software.                        #
+#                                                                            #
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR #
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,   #
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL    #
+# THE ABOVE COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER      #
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING    #
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER        #
+# DEALINGS IN THE SOFTWARE.                                                  #
+#                                                                            #
+# Except as contained in this notice, the name(s) of the above copyright     #
+# holders shall not be used in advertising or otherwise to promote the sale, #
+# use or other dealings in this Software without prior written               #
+# authorization.                                                             #
+##############################################################################
+
+# Parameter for this script is the name of the ".pc" file to generate.
+# From that, the script derives the name of the library.
+
+failed() {
+	echo "?? $*" >&2
+	exit 1
+}
+
+usage() {
+	failed "usage: $0 filename.pc"
+}
+
+prefix="@prefix@"
+exec_prefix="@exec_prefix@"
+includedir="@includedir@"
+datarootdir="@datarootdir@"
+datadir="@datadir@"
+libdir="@libdir@"
+
+[ $# != 1 ] && usage
+LIB_NAME="@LIB_ROOTNAME@"
+PKG_NAME=`echo "$1" | sed -e 's,^.*/,,' -e 's,[.].*,,'`
+
+[ "@SUB_INC@" = yes ] && includedir="$includedir/$LIB_NAME"
+
+echo "** includedir: $includedir"
+echo "** libdir:     $libdir"
+
+pkg_need=
+for opt in "" @REQUIRE_PKG@
+do
+	[ -n "$opt" ] && pkg_need="$pkg_need $opt"
+done
+
+c_flags=
+for opt in @CFLAGS@ @CPPFLAGS@
+do
+	if [ -n "@REQUIRE_PKG@" ]
+	then
+		for require in "" @REQUIRE_PKG@
+		do
+			[ -n "$require" ] || continue
+			for check in `pkg-config --cflags "$require"`
+			do
+				if [ "$opt" = "$check" ]
+				then
+					opt=
+					break
+				fi
+			done
+			[ -n "$opt" ] || break
+		done
+	fi
+	[ -n "$opt" ] || continue
+	case $opt in
+	-D_FORTIFY_SOURCE=*)
+		;;
+	-[DUI]*|-fPIC|-fpic|-KPIC)
+		c_flags="$c_flags $opt"
+		;;
+	esac
+done
+if [ "$includedir" != "/usr/include" ]; then
+	includetop=`echo "$includedir" | sed -e 's,/include/[^/]*$,/include,'`
+	[ "$includetop" = "/usr/include" ] && includetop="$includedir"
+	c_flags="$c_flags -I\${includedir}"
+	if [ "x$includetop" != "x$includedir" ]
+	then
+		c_flags="$c_flags -I${includetop}"
+	fi
+fi
+echo "** c_flags:   $c_flags"
+
+lib_opts=
+lib_show="-l$LIB_NAME"
+lib_hide=
+for opt in -L$libdir @LDFLAGS@ @LIBS@
+do
+	if [ -n "@REQUIRE_PKG@" ]
+	then
+		for require in "" @REQUIRE_PKG@
+		do
+			[ -n "$require" ] || continue
+			for check in `pkg-config --libs "$require"`
+			do
+				if [ "x$opt" = "x$check" ]
+				then
+					lib_hide="$lib_hide $opt"
+					opt=
+					break
+				fi
+			done
+			[ -n "$opt" ] || break
+		done
+	fi
+	[ -n "$opt" ] || continue
+	case $opt in
+	-l*)
+		lib_show="$lib_show $opt"
+		continue
+		;;
+	-specs*) # ignore linker specs-files which were used to build library
+		continue
+		;;
+	-Wl,-z,*) # ignore flags used to manipulate shared image
+		continue
+		;;
+	-Wl,--dynamic-linker*) # ignore ELF interpreter
+		continue
+		;;
+	-Wl,--as-needed|-Wl,--build-id=*|-Wl,-dT,*|-Wl,-T,*)
+		continue
+		;;
+	-L*)
+		lib_check=`echo "x$opt" | sed -e 's/^.-L//'`
+		# on a new/nonstandard install, $libdir may not yet exist at this point
+		if [ "$libdir" != "$lib_check" ]
+		then
+			[ -d "$lib_check" ] || continue
+		fi
+		case "$lib_check" in
+		@LD_SEARCHPATH@) # skip standard libdir
+			if [ "$lib_check" = "$libdir" ]
+			then
+				lib_first=yes
+				IFS_save="$IFS"
+				IFS='|'
+				LIBDIRS="@LD_SEARCHPATH@"
+				for lib_check in $LIBDIRS
+				do
+					if [ -d "$lib_check" ]
+					then
+						if [ "$lib_check" != "$libdir" ]
+						then
+							lib_first=no
+						fi
+						break
+					fi
+				done
+				IFS="$IFS_save"
+				[ $lib_first = yes ] && continue
+				found=no
+				for check in $lib_opts
+				do
+					if [ "x$check" = "x$opt" ]
+					then
+						found=yes
+						break
+					fi
+				done
+				[ $found = yes ] && continue
+				:
+			else
+				continue
+			fi
+			;;
+		*)
+			found=no
+			for check in $lib_opts
+			do
+				if [ "x$check" = "x$opt" ]
+				then
+					found=yes
+					break
+				fi
+			done
+			[ $found = yes ] && continue
+			;;
+		esac
+		;;
+	esac
+	lib_opts="$lib_opts $opt"
+done
+echo "** lib_opts:  $lib_opts"
+
+# The "URL" feature came in pkg-config 0.17
+USEURL=""
+CFGVER=`${PKG_CONFIG:-pkg-config} --version 2>/dev/null |head -n 1 | awk -F. '/0.[0-9][0-9]/{print $2;}'`
+# A missing version should simply fail, but some packagers insist on building
+# packages on machines which do not actually have the tools they depend on at
+# runtime.
+[ -z "$CFGVER" ] && CFGVER=30
+[ $CFGVER -ge 17 ] || USEURL="#"
+
+echo "** creating $1"
+cat >"$1" <<EOF
+# pkg-config file generated by $0
+# vile:makemode
+
+prefix=$prefix
+exec_prefix=$exec_prefix
+
+libdir=@libdir@
+includedir=$includedir
+datarootdir=$datarootdir/$LIB_NAME
+
+Name: ${PKG_NAME}
+Description: utility library for ${PKG_NAME}
+Version: @VERSION_MAJOR@.@VERSION_MINOR@-@VERSION_PATCH@
+${USEURL}URL: https://invisible-island.net/@PROGRAM@
+Requires:$pkg_need
+Requires.private:
+Libs:$lib_opts $lib_show
+Libs.private:$lib_hide
+Cflags:$c_flags
+EOF
+# vile:shmode ts=4 sw=4
